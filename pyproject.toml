@@ -1,0 +1,59 @@
+
+
+[build-system]
+
+requires = ["setuptools", 
+			"numpy",
+      "torch", 
+      "poseigen_seaside", 
+      "poseigen_trident"			
+			]
+
+[project]
+
+name = "poseigen_oyster"
+
+version = "0.0.1" 
+
+requires-python = ">=3.12"
+
+description = "The basics for Poseigen software"
+
+readme = "README.md"
+
+license = "MIT"
+
+license-files = ["LICEN[CS]E.*"]
+
+keywords = []
+
+authors = [{ name = "Husam Abdulnabi", email = "husam.abdulnabi@gmail.com" }]
+
+maintainers = [
+  { name = "Husam Abdulnabi", email = "husam.abdulnabi@gmail.com" },
+]
+
+classifiers = [
+  # How mature is this project? Common values are
+  #   3 - Alpha
+  #   4 - Beta
+  #   5 - Production/Stable
+  "Development Status :: 3 - Alpha",
+
+  # Indicate who your project is intended for
+  "Intended Audience :: Developers",
+  "Topic :: Software Development",
+
+  "Programming Language :: Python :: 3",
+  
+]
+
+dependencies = [
+  "numpy",
+  "torch", 
+  "poseigen_seaside", 
+  "poseigen_trident"		
+  ]
+
+[project.urls]
+"Homepage" = "https://github.com/husam94/poseigen_oyster"
