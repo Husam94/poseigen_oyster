@@ -24,6 +24,67 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 
+def SigContrib(model, inp, 
+                   sub_model = None, 
+                   batchsize = 256):
+
+    shapo = inp.shape #the 2nd dimension is always the number of sigs. 
+    num_sigs = shapo[1]
+
+    if isinstance(model, list) is False: model = [model]
+    #if sub_model is None: sub_model = ''
+
+    lk = len(inp)
+
+    fullbatches = lk // batchsize
+    rem = lk % batchsize
+
+    fins = []
+
+    for fb in np.arange(fullbatches + (rem > 0)):
+
+        fo = fb*batchsize
+        batch = inp[fo:fo + batchsize]
+
+        fin = []
+
+        for mo in model: 
+
+            if isinstance(mo, str): mo = tu.LoadTorch(mo)
+
+            if sub_model is not None: mo = getattr(mo, sub_model)
+            
+            with torch.no_grad(): 
+                mo.eval()
+
+                ger = 0 if isinstance(mo.O[0], nn.Conv2d) else 1
+
+                Dweight = mo.O[ger].weight
+                Dweight = torch.unsqueeze(Dweight, 0)
+
+                x = torch.FloatTensor(batch).to(device)
+
+                x = mo.Reflect(x)
+                x = mo.kE(x)
+                x = mo.AntiReflect(x)
+                x = mo.P(x)
+                
+                x = torch.unsqueeze(x, axis = 1)
+                x = x * Dweight
+                x = torch.squeeze(torch.sum(x, axis = 3))
+
+                xshapo = x.shape
+                x = torch.sum(x.reshape(xshapo[0], num_sigs, xshapo[-1] // num_sigs), -1)
+
+                fin.append(x.cpu().detach().numpy())
+
+        fin = np.mean(np.stack(fin), axis = 0)
+        fins.append(fin) 
+        
+    return np.vstack(fins)
+
+
+
 def kmer_contrib(model, inp, sub_model = None, 
                  joint = False, chunk = False): 
     
