@@ -7,6 +7,7 @@ import poseigen_seaside.basics as se
 import poseigen_trident.utils as tu
 import poseigen_trident.prongs as tp
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class  Oyster(nn.Module): 
@@ -288,3 +289,88 @@ DualOyster_BaseDict = {'A_dim_i': [[(1,249,4)],'cat'], #Set as a single dim_i
 
                       'activations': [[nn.ReLU(), nn.LeakyReLU()], 'cat'],
                       'batchnorm': [[None, 'before'], 'cat']}
+
+
+def Reset_DualOyster(dualoyster):
+    #ds consists of a "conv" and a "dense" module. Need to go through each one, see if its a conv and reset if so. 
+
+
+    for oyster in [dualoyster.OysterA, dualoyster.OysterB]: 
+        lke, los = len(oyster.kE), len(oyster.O)
+
+        for i in np.arange(lke): 
+            if isinstance(oyster.kE[i], nn.Conv2d): 
+                oyster.kE[i].reset_parameters()
+        
+        for i in np.arange(los): 
+            if isinstance(oyster.O[i], nn.Conv2d): 
+                oyster.O[i].reset_parameters()
+        print('done reset mod')
+
+    return dualoyster
+
+
+
+
+#================== ANALYSIS TOOLS ========================
+
+
+
+def SigContrib(model, inp, 
+                   sub_model = None, 
+                   batchsize = 256):
+
+    shapo = inp.shape #the 2nd dimension is always the number of sigs. 
+    num_sigs = shapo[1]
+
+    if isinstance(model, list) is False: model = [model]
+    #if sub_model is None: sub_model = ''
+
+    lk = len(inp)
+
+    fullbatches = lk // batchsize
+    rem = lk % batchsize
+
+    fins = []
+
+    for fb in np.arange(fullbatches + (rem > 0)):
+
+        fo = fb*batchsize
+        batch = inp[fo:fo + batchsize]
+
+        fin = []
+
+        for mo in model: 
+
+            if isinstance(mo, str): mo = tu.LoadTorch(mo)
+
+            if sub_model is not None: mo = getattr(mo, sub_model)
+            
+            with torch.no_grad(): 
+                mo.eval()
+
+                ger = 0 if isinstance(mo.O[0], nn.Conv2d) else 1
+
+                Dweight = mo.O[ger].weight
+                Dweight = torch.unsqueeze(Dweight, 0)
+
+                x = torch.FloatTensor(batch).to(device)
+
+                x = mo.Reflect(x)
+                x = mo.kE(x)
+                x = mo.AntiReflect(x)
+                x = mo.P(x)
+                
+                x = torch.unsqueeze(x, axis = 1)
+                x = x * Dweight
+                x = torch.squeeze(torch.sum(x, axis = 3))
+
+                xshapo = x.shape
+                x = torch.sum(x.reshape(xshapo[0], num_sigs, xshapo[-1] // num_sigs), -1)
+
+                fin.append(x.cpu().detach().numpy())
+
+        fin = np.mean(np.stack(fin), axis = 0)
+        fins.append(fin) 
+        
+    return np.vstack(fins)
