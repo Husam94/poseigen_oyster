@@ -1,27 +1,17 @@
 
 # These functions are specific to EXACT OYSTER
 
-import sys
-sys.path.insert(-1, '/mnt/x/Computation/ocu/utilities')
-
 import numpy as np
-import pickle
-import copy
-import scipy
 
-import ocu_seaside.ocu_basics as se
-import ocu_chisel as chis
-import ocu_binmeths as bm
-import ocu_compass as co
-import ocu_trident.ocu_tri_utils as tu
-
-import ocu_oyster as oys
+import poseigen_chisel as chis
+import poseigen_trident.utils as tu
 
 import torch
 import torch.nn as nn
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
+from sklearn.cluster import KMeans, AgglomerativeClustering
+from kneed import KneeLocator
 
 
 def SigContrib(model, inp, 
@@ -287,11 +277,6 @@ def contrib_fill(contribs, seq_len,
 
 
 
-from sklearn.cluster import KMeans, AgglomerativeClustering
-
-from kneed import KneeLocator
-
-
 def kmer_cluster(inp, H_size,
                  num_clusters = 10, sample = None,
                  chunk = False, 
@@ -333,10 +318,6 @@ def cluster_centroids(signal, clusters):
     #signal is a (n, *) shape and clusters is a 1dim
     return np.stack([np.mean(signal[clusters == b], axis = 0) for b in np.unique(clusters)])
 
-
-from kneed import KneeLocator
-
-from sklearn.cluster import AgglomerativeClustering
 
 def cluster_refine(signal, clusters, S = 1, return_newcents = False):
                    

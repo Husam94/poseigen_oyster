@@ -6,7 +6,10 @@ requires = ["setuptools",
 			"numpy",
       "torch", 
       "poseigen_seaside", 
-      "poseigen_trident"			
+      "poseigen_trident",
+      "poseigen_chisel", 
+      "sklearn", 
+      "kneed"			
 			]
 
 [project]
@@ -52,7 +55,10 @@ dependencies = [
   "numpy",
   "torch", 
   "poseigen_seaside", 
-  "poseigen_trident"		
+  "poseigen_trident"
+  "poseigen_chisel", 
+  "sklearn", 
+  "kneed"		
   ]
 
 [project.urls]

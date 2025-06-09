@@ -1,12 +1,11 @@
 import numpy as np
 
-import torch
-import torch.nn as nn
-
 import poseigen_seaside.basics as se
 import poseigen_trident.utils as tu
 import poseigen_trident.prongs as tp
 
+import torch
+import torch.nn as nn
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
