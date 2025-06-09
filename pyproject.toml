@@ -16,7 +16,7 @@ requires = ["setuptools",
 
 name = "poseigen_oyster"
 
-version = "0.0.2" 
+version = "0.0.3"
 
 requires-python = ">=3.12"
 
@@ -55,7 +55,7 @@ dependencies = [
   "numpy",
   "torch", 
   "poseigen_seaside", 
-  "poseigen_trident"
+  "poseigen_trident",
   "poseigen_chisel", 
   "sklearn", 
   "kneed"		
