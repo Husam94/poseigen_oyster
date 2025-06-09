@@ -8,7 +8,7 @@ requires = ["setuptools",
       "poseigen_seaside", 
       "poseigen_trident",
       "poseigen_chisel", 
-      "sklearn", 
+      "scikit-learn", 
       "kneed"			
 			]
 
@@ -16,7 +16,7 @@ requires = ["setuptools",
 
 name = "poseigen_oyster"
 
-version = "0.0.3"
+version = "0.0.4"
 
 requires-python = ">=3.12"
 
@@ -57,7 +57,7 @@ dependencies = [
   "poseigen_seaside", 
   "poseigen_trident",
   "poseigen_chisel", 
-  "sklearn", 
+  "scikit-learn", 
   "kneed"		
   ]
 
