@@ -17,6 +17,8 @@ from kneed import KneeLocator
 def SigContrib(model, inp, 
                    sub_model = None, 
                    batchsize = 256):
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     shapo = inp.shape #the 2nd dimension is always the number of sigs. 
     num_sigs = shapo[1]

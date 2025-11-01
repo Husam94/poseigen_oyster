@@ -1,0 +1,11 @@
+LICENSE.txt
+README.md
+pyproject.toml
+src/poseigen_oyster/__init__.py
+src/poseigen_oyster/analysis.py
+src/poseigen_oyster/model.py
+src/poseigen_oyster.egg-info/PKG-INFO
+src/poseigen_oyster.egg-info/SOURCES.txt
+src/poseigen_oyster.egg-info/dependency_links.txt
+src/poseigen_oyster.egg-info/requires.txt
+src/poseigen_oyster.egg-info/top_level.txt
