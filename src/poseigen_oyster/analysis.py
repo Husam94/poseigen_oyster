@@ -16,7 +16,7 @@ from kneed import KneeLocator
 
 def SigContrib(model, inp, 
                    sub_model = None, 
-                   batchsize = 256):
+                   batchsize = 256, model_weights = None):
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -70,7 +70,9 @@ def SigContrib(model, inp,
 
                 fin.append(x.cpu().detach().numpy())
 
-        fin = np.mean(np.stack(fin), axis = 0)
+        if model_weights is None: fin = np.mean(np.stack(fin), axis = 0)
+        else: fin = np.average(np.stack(fin), axis = 0)
+        
         fins.append(fin) 
         
     return np.vstack(fins)
@@ -78,9 +80,13 @@ def SigContrib(model, inp,
 
 
 def kmer_contrib(model, inp, sub_model = None, 
+                 dim_kE_length = None,
                  joint = False, chunk = False): 
     
     # The inp is (kmer, *kmer shape)
+
+    # Bias term in the dense layer is spread out to kE to simplify interpretation. 
+    # Especially useful for dual oyster which can have different bias
 
     mo = tu.LoadTorch(model) if isinstance(model, str) else model
     
@@ -88,14 +94,25 @@ def kmer_contrib(model, inp, sub_model = None,
 
     shapo = inp.shape
 
+
     with torch.no_grad(): 
         mo.eval()
+
+        #---------------------------------
 
         ger = 0 if isinstance(mo.O[0], nn.Conv2d) else 1
 
         Dweight = mo.O[ger].weight
         Dweight = torch.unsqueeze(Dweight, 0)
 
+        Dbias = mo.O[ger].bias
+        if Dbias is None: Dbias = 0
+        else: 
+            if dim_kE_length is None: dim_kE_length = mo.dim_kE_length
+            Dbias = Dbias / dim_kE_length
+        
+        #---------------------------------
+        
         x = inp
 
         if joint: x = mo.Reflect(x)
@@ -118,54 +135,89 @@ def kmer_contrib(model, inp, sub_model = None,
             x = x.reshape(xshapo[0], xshapo[1], shapo[1], xshapo[2] // shapo[1], *xshapo[-2:])
             x = torch.sum(x, axis = 3)
         else: 
-            x = torch.sum(x, axis = -3)
+            x = torch.sum(x, axis = -3, keepdim=True)
 
         if joint: x = torch.unsqueeze(torch.mean(x, axis = -1), dim= -1)
+    
+        x = x + Dbias
 
     return x.cpu().detach().numpy()
 
 
-def kmer_contrib_multi(model, inp, sub_model = None, 
-                       joint = False, chunk = False, batchsize = 256):
+def kmer_contrib_multi(model, inp, sub_model=None, 
+                       joint=False, chunk=False, batchsize=256,
+                       model_weights=None, dim_kE_length = None):
+    ''' inp can be 4 dimensional (N, *trident) or 5 dimensional (N, win num, *trident) '''
+
+    # Check if inp is 5-dimensional and reshape it to 4-dimensional
+    original_shape = inp.shape
+    if inp.ndim == 5:
+        inp = inp.reshape(-1, *original_shape[2:])  # Flatten the first two axes
 
     lk = len(inp)
     fullbatches = lk // batchsize
     rem = lk % batchsize
 
-    kc_args = {'sub_model': sub_model, 'joint': joint, 'chunk': chunk}
+    kc_args = {'sub_model': sub_model, 'joint': joint, 'chunk': chunk, 'dim_kE_length': dim_kE_length}
+
+    # Validate/normalize model weights once
+    model_weights_arr = None
+    if isinstance(model, list) and (model_weights is not None):
+        model_weights_arr = np.asarray(model_weights, dtype=float).reshape(-1)
+        if len(model_weights_arr) != len(model):
+            raise ValueError(
+                f"model_weights must have length {len(model)} (got {len(model_weights_arr)})."
+            )
+        wsum = np.sum(model_weights_arr)
+        if wsum == 0:
+            raise ValueError("model_weights must sum to a non-zero value.")
+        model_weights_arr = model_weights_arr / wsum
 
     fins = []
 
     for fb in np.arange(fullbatches + (rem > 0)):
-
-        fo = fb*batchsize
-
+        fo = fb * batchsize
         batch = inp[fo:fo + batchsize]
 
         batch_t = torch.FloatTensor(batch).to(device)
 
-        if isinstance(model, list): 
-            fin = [kmer_contrib(m, batch_t, ** kc_args) for m in model]
-            fin = np.mean(np.stack(fin), axis = 0)
-        else: 
-            fin = kmer_contrib(model, batch_t, ** kc_args)
+        if isinstance(model, list):
+            fin = [kmer_contrib(m, batch_t, **kc_args) for m in model]
+            fin = np.stack(fin, axis=0)
+
+            if model_weights_arr is None:
+                fin = np.mean(fin, axis=0)
+            else:
+                fin = np.average(fin, axis=0, weights=model_weights_arr)
+        else:
+            if model_weights is not None:
+                raise ValueError("model_weights can only be used when model is a list.")
+            fin = kmer_contrib(model, batch_t, **kc_args)
         
         fins.append(fin)
-    
+
     fins = np.vstack(fins)
 
-    return fins
+    fins = fins[:, 0, :, :, 0]
 
+    # Reshape the output back to 5-dimensional if the input was 5-dimensional
+    if len(original_shape) > 4:  # Check if the input was 5-dimensional
+        fins = fins.reshape(original_shape[0], original_shape[1], *fins.shape[1:])
+    
+    return fins
 
 
 def kppm_contrib(model, kppm,
                  
                  sub_model = None, joint = False, chunk = False,
                  score_mode = 'recipeuc',
+
+                 abs = False,
                  
                  random_seqs = 10000, unique = True, 
-                 scoreweight = True, batchsize = 256):
-
+                 scoreweight = True, batchsize = 256,
+                 model_weights = None, dim_kE_length = None):
+    
     # generates kmers from the ppm and scores them to the final output
     # ppm must be the same size as the model head 
 
@@ -173,7 +225,12 @@ def kppm_contrib(model, kppm,
     kmers_OHE = np.expand_dims(chis.Seqs2OHE(kmers), axis = 1)
 
     fins = kmer_contrib_multi(model, kmers_OHE, sub_model = sub_model,
-                              joint = joint, chunk = chunk, batchsize = batchsize)
+                              joint = joint, chunk = chunk, batchsize = batchsize,
+                              model_weights = model_weights, dim_kE_length=dim_kE_length)
+    
+    if abs: 
+        fins = np.abs(fins)
+        #print(np.median(fins, axis = 0))
 
     if scoreweight: 
 
@@ -187,7 +244,7 @@ def kppm_contrib(model, kppm,
 
     return out
 
-def contrib_perpos(contribs, oys_dict, submodel = None):
+def contrib_perpos(contribs, oys_dict, submodel = None, k_len = None):
    
     # this function takes your contribution per position block 
     # and expands it to the whole sequence
@@ -201,12 +258,18 @@ def contrib_perpos(contribs, oys_dict, submodel = None):
     submodel = '' if submodel is None else submodel + '_'
 
     seq_len = oys_dict[submodel + 'dim_i'][1]
-    k_len, P_ck = [oys_dict[submodel + xoo] for xoo in ['kE_k', 'P_ck']]
-    P_center = oys_dict['P_center']
+    P_ck = oys_dict[submodel + 'P_ck']
+    
+    
+    if 'P_center' in oys_dict.keys(): P_center = oys_dict['P_center']
+    else: P_center = False
+
+    if k_len is None: k_len = oys_dict[submodel + 'kE_k']
 
     #-------------------------------
 
-    dim_kE_length = seq_len - k_len + 1
+    dim_kE_length = seq_len - k_len + 1                                                     
+
 
     needed = P_ck - (dim_kE_length % P_ck)
     pad2add = (needed // 2) if P_center else 0
@@ -228,11 +291,13 @@ def contrib_perpos(contribs, oys_dict, submodel = None):
     return contribs_perpos
 
 
-def sppm_contrib(kppm_contribs_exp, kppm_idxs):
+def sppm_contrib(kppm_contribs_exp, kppm_idxs, sum = False):
 
     #This returns a list since they can be different sizes. 
 
     sizo = kppm_contribs_exp.shape[1]
+
+    funco = np.sum if sum else np.mean
 
     outs = []
     for idxs in kppm_idxs: 
@@ -279,16 +344,20 @@ def contrib_fill(contribs, seq_len,
 
 
 
-def kmer_cluster(inp, H_size,
+def kmer_cluster(inp,
                  num_clusters = 10, sample = None,
                  chunk = False, 
                  cluster_mode = [KMeans, {}]):
-
-    sig_win_rs = tu.TridentWindow(inp, H_size)
-
-    num_sigs = sig_win_rs.shape[1]
     
-    lk = len(sig_win_rs)
+
+    ''' inp is in window format: (N, num_win, *trident)'''
+
+    
+    original_shape = inp.shape
+
+    inp = inp.reshape(-1, *original_shape[2:])
+    num_sigs = inp.shape[1]
+    lk = len(inp)
     
     if isinstance(sample, int): 
         rando = np.random.choice(np.arange(lk), sample, replace=False)
@@ -299,64 +368,100 @@ def kmer_cluster(inp, H_size,
         clustod = []
         for i in np.arange(num_sigs):
 
-            sig = sig_win_rs[:, i].reshape(lk, -1)
+            sig = inp[:, i].reshape(lk, -1)
             sig_samp = sig[rando]
             clust = cluster_mode[0](n_clusters = num_clusters, **cluster_mode[1])
             clust.fit(sig_samp)
             clustod.append(clust.predict(sig))
             print(f'finished: {i}')
         
-        clustod = np.stack(clustod, axis = 1)
+        clustod = np.stack(clustod, axis = 1)           # (N, signals)
     
     else: 
         clust = cluster_mode[0](n_clusters = num_clusters, **cluster_mode[1])
-        clust.fit(sig_win_rs[rando].reshape(len(rando), -1))
-        clustod = clust.predict(sig_win_rs.reshape(lk, -1))
+        clust.fit(inp[rando].reshape(len(rando), -1))
+        clustod = clust.predict(inp.reshape(lk, -1))    # (N,)
+
+        clustod = np.expand_dims(clustod, axis = 1)     # (N, 1)
+
+
+    clustod = clustod.reshape(*original_shape[:2], *clustod.shape[1:])
     
     return clustod
 
 
 def cluster_centroids(signal, clusters):
+
+    '''signal is of shape (N, *whatever), clusters is of shape (N)'''
+
     #signal is a (n, *) shape and clusters is a 1dim
     return np.stack([np.mean(signal[clusters == b], axis = 0) for b in np.unique(clusters)])
 
-
 def cluster_refine(signal, clusters, S = 1, return_newcents = False):
-                   
-    #uses agglomerative clsutering on centroids 
-    # S is sensitivity for kneed. 
 
-    clust1_uni = np.unique(clusters)
+    ''' 
+    uses agglomerative clsutering on centroids 
+    signal input = (N, num_win, *trident), clusters input = (N, num_win, num_signals)
+    S is sensitivity for kneed
 
-    cents1 = cluster_centroids(signal, clusters)
-    model1 = AgglomerativeClustering(distance_threshold=0, n_clusters=None)
-    model1 = model1.fit(cents1.reshape(len(cents1), -1))
+    output clusters is the same shape of clusters input
+      '''
 
-    kn = KneeLocator(np.arange(len(model1.distances_)), model1.distances_, 
-                     S = S, 
-                     curve='convex', direction='increasing')
-    kno = kn.knee
+    original_shape = signal.shape
 
-    model2 = AgglomerativeClustering(distance_threshold=model1.distances_[kno], n_clusters=None)
-    clust2 = model2.fit_predict(cents1.reshape(len(cents1), -1)) #you have a lst the length of unique clusters
+    signal = signal.reshape(-1, *original_shape[2:])
+
+    clusters = clusters.reshape(-1, clusters.shape[-1])
+
+    newclust_all, newcents_all = [], []
+
+    for iclu, clustod in enumerate(clusters.T): 
+        
+        if clusters.shape[1] > 1: 
+            exo = (1, *original_shape[3:])
+            sigo = signal[:, iclu].reshape(signal.shape, -1)
+        else: 
+            exo = original_shape[2:]
+            sigo = signal.reshape(signal.shape[0], -1)
+
+        clust1_uni = np.unique(clustod)
+
+        cents1 = cluster_centroids(sigo, clustod)                 # (num_clusters, signal flat) 
+
+        model1 = AgglomerativeClustering(distance_threshold=0, n_clusters=None)
+        model1 = model1.fit(cents1)
+
+        kn = KneeLocator(np.arange(len(model1.distances_)), model1.distances_, 
+                        S = S, 
+                        curve='convex', direction='increasing')
+        kno = kn.knee
+
+        model2 = AgglomerativeClustering(distance_threshold=model1.distances_[kno], n_clusters=None)
+        clust2 = model2.fit_predict(cents1) 
 
 
-    clust2_uni = np.unique(clust2)
+        clust2_uni = np.unique(clust2)
+        
+        print(f'from {len(clust1_uni)} to {len(clust2_uni)}')
+
+        clust2_sepidx = [clust1_uni[clust2 == u] for u in clust2_uni] #This now tells you which of the original clusters belongs to each new cluster 
+
+        newclust = np.ones(len(clustod))
+        for u,g in zip(clust2_uni, clust2_sepidx): 
+            for h in g:
+                newclust[clustod == h] = u 
+
+        newclust_rs = newclust.reshape(*original_shape[:2])
+        newclust_all.append(newclust_rs)
     
-    print(f'from {len(clust1_uni)} to {len(clust2_uni)}')
 
-    clust2_sepidx = [clust1_uni[clust2 == u] for u in clust2_uni] #This now tells you which of the original clusters belongs to each new cluster 
+        newcents = cluster_centroids(sigo, newclust)                # (num_clusters, signal flat)
+        newcents_rs = newcents.reshape(-1, *exo)
+        newcents_all.append(newcents_rs)
 
+    newclust_all = np.stack(newclust_all, axis = -1)
 
-    newclust = np.ones(len(clusters))
-    for u,g in zip(clust2_uni, clust2_sepidx): 
-        for h in g:
-            newclust[clusters == h] = u 
-    
-
-    newcents = cluster_centroids(signal, newclust)
-
-    return (newclust, newcents) if return_newcents else newclust
+    return (newclust_all, newcents_all) if return_newcents else newclust_all
 
 
 def centroid_contrib(wins, contribs, clusters, 
