@@ -56,9 +56,14 @@ def SigContrib(model, inp,
 
                 x = torch.FloatTensor(batch).to(device)
 
-                x = mo.Reflect(x)
+                if hasattr(mo, "Reflect") and callable(getattr(mo, "Reflect")):
+                    mo.Reflect()
+                
                 x = mo.kE(x)
-                x = mo.AntiReflect(x)
+                
+                if hasattr(mo, "AntiReflect") and callable(getattr(mo, "AntiReflect")):
+                    mo.AntiReflect()
+                
                 x = mo.P(x)
                 
                 x = torch.unsqueeze(x, axis = 1)
@@ -419,7 +424,7 @@ def cluster_refine(signal, clusters, S = 1, return_newcents = False):
         
         if clusters.shape[1] > 1: 
             exo = (1, *original_shape[3:])
-            sigo = signal[:, iclu].reshape(signal.shape, -1)
+            sigo = signal[:, iclu, :, 0]
         else: 
             exo = original_shape[2:]
             sigo = signal.reshape(signal.shape[0], -1)
@@ -555,4 +560,471 @@ def centroid_contrib(wins, contribs, clusters,
 
     return (centroids_all, contrib_cents_all) if return_centroids else contrib_cents_all
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#==================================
+''' ANALYZING NON OYSTER MODELS '''
+
+from scipy.stats import mode as scipy_mode
+
+def evaluate_motif_matrix(
+    motif_mat,
+    total_seq_len,
+    num_rand,
+    n_kmers,
+    model_pns,
+    sub_model=None,
+    weights=None,
+    target=0,
+    method='ixg',
+    device=None,
+    every_other=1,
+    batch_size=512,
+    random_seqs=None,
+    signals=None,
+    return_signal_attributions=False,
+):
+    """
+    Evaluate a single motif matrix on sequence attributions.
+    If `signals` is provided, a zero signal array of the same shape is used
+    as the neutral signal background. If `return_signal_attributions` is True,
+    signal attributions computed on that zero background are returned.
+
+    Parameters
+    ----------
+    signals : np.ndarray, optional
+        Signal input for each random sequence, shape (num_rand, *signal_shape).
+    return_signal_attributions : bool
+        If True and signals is provided, also return signal attributions.
+
+    Returns
+    -------
+    dict
+        {
+            'positions': np.ndarray,
+            'sampled_positions': np.ndarray,
+            'mean': np.ndarray,
+            'median': np.ndarray,
+            'std': np.ndarray,
+            'mode': np.ndarray,
+            'values': np.ndarray,
+            'kmer_weights': np.ndarray,
+            'similarities': np.ndarray,
+            # plus signal_* fields if return_signal_attributions=True
+        }
+    """
+    motif_len = len(motif_mat)
+    num_pos = total_seq_len - motif_len + 1
+    positions = np.arange(num_pos)
+    sampled_positions = positions[::every_other]
+
+    if sampled_positions[-1] != positions[-1]:
+        sampled_positions = np.append(sampled_positions, positions[-1])
+
+    if random_seqs is None:
+        random_seqs = chis.generate_random_seqs(total_seq_len, num_rand)
+    assert random_seqs.shape == (num_rand, total_seq_len, 4)
+
+    kmers = chis.sample_kmers_from_motif(motif_mat, n_kmers)
+    similarities = np.array([
+        chis.score_kmer_similarity(k, motif_mat) for k in kmers
+    ])
+    kmer_weights = similarities / similarities.sum()
+
+    if signals is not None:
+        if signals.shape[0] != num_rand:
+            raise ValueError(
+                f"signals must have first dimension {num_rand}, got {signals.shape[0]}"
+            )
+        signals_zero = np.zeros_like(signals)
+    else:
+        signals_zero = None
+
+    per_position_values = []
+    per_position_signal_values = [] if return_signal_attributions else None
+
+    for pos in sampled_positions:
+        batch_list = []
+        for kmer in kmers:
+            seqs_with_kmer = chis.embed_kmer_in_seqs(kmer, random_seqs, pos)
+            batch_list.append(seqs_with_kmer)
+        batch_seqs = np.concatenate(batch_list, axis=0)
+
+        batch_signals = None
+        if signals_zero is not None:
+            batch_signals = np.repeat(signals_zero, n_kmers, axis=0)
+
+        if method == 'ixg':
+            if batch_signals is not None:
+                attr_seqs, attr_signals = batched_ensemble_ixg(
+                    model_pns=model_pns,
+                    sub_model=sub_model,
+                    seqs=batch_seqs,
+                    signals=batch_signals,
+                    target=target,
+                    weights=weights,
+                    device=device,
+                    batch_size=batch_size,
+                )
+                if not return_signal_attributions:
+                    attr_signals = None
+            else:
+                attr_seqs = batched_ensemble_ixg(
+                    model_pns=model_pns,
+                    sub_model=sub_model,
+                    seqs=batch_seqs,
+                    target=target,
+                    weights=weights,
+                    device=device,
+                    batch_size=batch_size,
+                )
+                attr_signals = None
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        # --- sequence motif score only ---
+        attr_seqs = attr_seqs.reshape(n_kmers, num_rand, 1, total_seq_len, 4)
+        motif_attr = (
+            attr_seqs[:, :, 0, pos:pos + motif_len, :].sum(axis=(2, 3)) / motif_len
+        )
+        weighted_per_seq = np.average(motif_attr, axis=0, weights=kmer_weights)
+        per_position_values.append(weighted_per_seq)
+
+        # --- signal attributions (optional) ---
+        if return_signal_attributions and attr_signals is not None:
+            attr_signals = attr_signals.reshape(
+                n_kmers, num_rand, *attr_signals.shape[1:]
+            )
+            signal_scores = np.abs(attr_signals).sum(
+                axis=tuple(range(2, attr_signals.ndim))
+            )
+            weighted_signal_per_seq = np.average(
+                signal_scores, axis=0, weights=kmer_weights
+            )
+            per_position_signal_values.append(weighted_signal_per_seq)
+
+        if pos % 100 == 0:
+            print(f"  finished position {pos}")
+
+    per_position_values = np.stack(per_position_values, axis=0)
+
+    mean_sampled = per_position_values.mean(axis=1)
+    median_sampled = np.median(per_position_values, axis=1)
+    std_sampled = per_position_values.std(axis=1)
+    mode_sampled, _ = scipy_mode(
+        per_position_values, axis=1, keepdims=False
+    )
+
+    def _interp(y):
+        return np.interp(
+            positions.astype(float),
+            sampled_positions.astype(float),
+            y,
+        )
+
+    result = {
+        'positions': positions,
+        'sampled_positions': sampled_positions,
+        'mean': _interp(mean_sampled),
+        'median': _interp(median_sampled),
+        'std': _interp(std_sampled),
+        'mode': _interp(mode_sampled.astype(float)),
+        'values': per_position_values,
+        'kmer_weights': kmer_weights,
+        'similarities': similarities,
+    }
+
+    if return_signal_attributions and per_position_signal_values:
+        per_position_signal_values = np.stack(per_position_signal_values, axis=0)
+
+        mean_sig_sampled = per_position_signal_values.mean(axis=1)
+        median_sig_sampled = np.median(per_position_signal_values, axis=1)
+        std_sig_sampled = per_position_signal_values.std(axis=1)
+        mode_sig_sampled, _ = scipy_mode(
+            per_position_signal_values, axis=1, keepdims=False
+        )
+
+        result.update({
+            'signal_mean': _interp(mean_sig_sampled),
+            'signal_median': _interp(median_sig_sampled),
+            'signal_std': _interp(std_sig_sampled),
+            'signal_mode': _interp(mode_sig_sampled.astype(float)),
+            'signal_values': per_position_signal_values,
+        })
+
+    return result
+
+def evaluate_motif_at_position(
+    motif_mat,
+    position,
+    total_seq_len,
+    num_rand,
+    n_kmers,
+    model_pns,
+    sub_model=None,
+    weights=None,
+    target=0,
+    method='ixg',
+    device=None,
+    batch_size=512,
+    random_seqs=None,
+    signals=None,
+    return_signal_attributions=False,
+    seed=None,
+):
+    """
+    Evaluate a single motif matrix at a single position on sequence attributions.
+    If `signals` is provided, zero signals are used as neutral background.
+    """
+    motif_len = len(motif_mat)
+
+    if random_seqs is None:
+        random_seqs = chis.generate_random_seqs(
+            total_seq_len=total_seq_len,
+            num_rand=num_rand,
+            seed=seed,
+        )
+    assert random_seqs.shape == (num_rand, total_seq_len, 4)
+
+    kmers = chis.sample_kmers_from_motif(motif_mat, n_kmers)
+    similarities = np.array([
+        chis.score_kmer_similarity(k, motif_mat) for k in kmers
+    ])
+    kmer_weights = similarities / similarities.sum()
+
+    batch_list = []
+    for kmer in kmers:
+        seqs_with_kmer = chis.embed_kmer_in_seqs(kmer, random_seqs, position)
+        batch_list.append(seqs_with_kmer)
+    batch_seqs = np.concatenate(batch_list, axis=0)
+
+    if signals is not None:
+        if signals.shape[0] != num_rand:
+            raise ValueError(
+                f"signals must have first dimension {num_rand}, got {signals.shape[0]}"
+            )
+        batch_signals = np.repeat(np.zeros_like(signals), n_kmers, axis=0)
+    else:
+        batch_signals = None
+
+    if method == 'ixg':
+        if batch_signals is not None:
+            attr_seqs, attr_signals = batched_ensemble_ixg(
+                model_pns=model_pns,
+                sub_model=sub_model,
+                seqs=batch_seqs,
+                signals=batch_signals,
+                target=target,
+                weights=weights,
+                device=device,
+                batch_size=batch_size,
+            )
+            if not return_signal_attributions:
+                attr_signals = None
+        else:
+            attr_seqs = batched_ensemble_ixg(
+                model_pns=model_pns,
+                sub_model=sub_model,
+                seqs=batch_seqs,
+                target=target,
+                weights=weights,
+                device=device,
+                batch_size=batch_size,
+            )
+            attr_signals = None
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+    # --- sequence motif score only ---
+    attr_seqs = attr_seqs.reshape(n_kmers, num_rand, 1, total_seq_len, 4)
+    motif_attr = (
+        attr_seqs[:, :, 0, position:position + motif_len, :].sum(axis=(2, 3)) / motif_len
+    )
+    weighted_per_seq = np.average(motif_attr, axis=0, weights=kmer_weights)
+
+    result = {
+        'per_seq_values': weighted_per_seq,
+        'mean': float(np.mean(weighted_per_seq)),
+        'median': float(np.median(weighted_per_seq)),
+        'std': float(np.std(weighted_per_seq)),
+        'abs_mean': float(np.mean(np.abs(weighted_per_seq))),
+        'position': position,
+        'kmer_weights': kmer_weights,
+        'similarities': similarities,
+    }
+
+    if return_signal_attributions and attr_signals is not None:
+        attr_signals = attr_signals.reshape(n_kmers, num_rand, *attr_signals.shape[1:])
+        signal_scores = np.abs(attr_signals).sum(
+            axis=tuple(range(2, attr_signals.ndim))
+        )
+        weighted_signal_per_seq = np.average(
+            signal_scores, axis=0, weights=kmer_weights
+        )
+
+        result.update({
+            'signal_per_seq_values': weighted_signal_per_seq,
+            'signal_attr_mean': float(np.mean(weighted_signal_per_seq)),
+            'signal_attr_median': float(np.median(weighted_signal_per_seq)),
+            'signal_attr_std': float(np.std(weighted_signal_per_seq)),
+            'signal_attr_abs_mean': float(np.mean(np.abs(weighted_signal_per_seq))),
+        })
+
+    return result
+
+
+def combine_motif_pair(result_fwd, result_rc, std_method='sem'):
+    """
+    Combine forward and reverse-complement motif results.
+
+    Parameters
+    ----------
+    result_fwd, result_rc : dict
+        Output dictionaries from evaluate_motif_matrix.
+    std_method : {'sem', 'rss'}
+        'sem'  : sqrt((std_fwd^2 + std_rc^2) / 2)
+        'rss'  : sqrt(std_fwd^2 + std_rc^2)
+
+    Returns
+    -------
+    dict with combined mean, std, median, mode, and positions.
+    """
+    mean = (result_fwd['mean'] + result_rc['mean']) / 2.0
+    median = (result_fwd['median'] + result_rc['median']) / 2.0
+    mode = (result_fwd['mode'] + result_rc['mode']) / 2.0
+
+    std_fwd = result_fwd['std']
+    std_rc = result_rc['std']
+
+    if std_method == 'sem':
+        std = np.sqrt((std_fwd**2 + std_rc**2) / 2.0)
+    elif std_method == 'rss':
+        std = np.sqrt(std_fwd**2 + std_rc**2)
+    else:
+        raise ValueError("std_method must be 'sem' or 'rss'")
+
+    return {
+        'positions': result_fwd['positions'],
+        'mean': mean,
+        'median': median,
+        'mode': mode,
+        'std': std,
+        'mean_fwd': result_fwd['mean'],
+        'mean_rc': result_rc['mean'],
+        'std_fwd': std_fwd,
+        'std_rc': std_rc,
+    }
+
+
+#---------- IXG ------------------
+
+from captum.attr import InputXGradient
+
+
+def ixg_attribution(model_pn, seqs, signals=None, target=None, device=None, sub_model=None):
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = tu.LoadTorch(model_pn)
+    if sub_model is not None:
+        model = getattr(model, sub_model)
+    model.to(device)
+    model.eval()
+
+    if isinstance(seqs, np.ndarray):
+        seqs = torch.tensor(seqs, dtype=torch.float32)
+    if seqs.ndim == 3:
+        seqs = seqs.unsqueeze(1)
+    seqs = seqs.to(device)
+
+    inputs = seqs
+    if signals is not None:
+        if isinstance(signals, np.ndarray):
+            signals = torch.tensor(signals, dtype=torch.float32)
+        signals = signals.to(device)
+        inputs = (seqs, signals)
+
+    ixg = InputXGradient(model)
+    attr = ixg.attribute(inputs, target=target)
+
+    if signals is not None:
+        return tuple(a.detach().cpu().numpy() for a in attr)
+    return attr.detach().cpu().numpy()
+
+
+def ensemble_ixg(model_pns, seqs, signals=None, sub_model=None, target=None,
+                 weights=None, device=None):
+    attrs = [
+        ixg_attribution(pn, seqs, signals=signals, target=target,
+                        device=device, sub_model=sub_model)
+        for pn in model_pns
+    ]
+
+    if signals is not None:
+        seq_attrs = np.stack([a[0] for a in attrs], axis=0)
+        sig_attrs = np.stack([a[1] for a in attrs], axis=0)
+
+        if weights is not None:
+            weights = np.asarray(weights) / np.sum(weights)
+            seq_attrs = np.average(seq_attrs, axis=0, weights=weights)
+            sig_attrs = np.average(sig_attrs, axis=0, weights=weights)
+        else:
+            seq_attrs = seq_attrs.mean(axis=0)
+            sig_attrs = sig_attrs.mean(axis=0)
+
+        return seq_attrs, sig_attrs
+
+    attrs = np.stack(attrs, axis=0)
+    if weights is not None:
+        weights = np.asarray(weights) / np.sum(weights)
+        attrs = np.average(attrs, axis=0, weights=weights)
+    else:
+        attrs = attrs.mean(axis=0)
+    return attrs
+
+
+def batched_ensemble_ixg(model_pns, seqs, signals=None, target=None, weights=None,
+                         device=None, batch_size=512, sub_model=None):
+    seqs = np.asarray(seqs)
+    n = seqs.shape[0]
+    seq_attrs = []
+    sig_attrs = [] if signals is not None else None
+
+    for i in range(0, n, batch_size):
+        batch_seqs = seqs[i:i + batch_size]
+        batch_signals = signals[i:i + batch_size] if signals is not None else None
+        attr = ensemble_ixg(
+            model_pns=model_pns,
+            seqs=batch_seqs,
+            signals=batch_signals,
+            sub_model=sub_model,
+            target=target,
+            weights=weights,
+            device=device,
+        )
+        if signals is not None:
+            seq_attrs.append(attr[0])
+            sig_attrs.append(attr[1])
+        else:
+            seq_attrs.append(attr)
+
+    seq_attrs = np.concatenate(seq_attrs, axis=0)
+    if signals is not None:
+        return seq_attrs, np.concatenate(sig_attrs, axis=0)
+    return seq_attrs
 

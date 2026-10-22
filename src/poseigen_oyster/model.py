@@ -586,3 +586,280 @@ def Reset_DualOyster(dualoyster):
 
 
 
+
+
+
+
+#=============================================================================
+
+class Oyster_V2_chunked(nn.Module): 
+    """
+    V2 uses dense layers after position reduction, not CPMs. -
+    """
+    
+    def __init__(self, 
+                 dim_i = (1,249,4), dim_f = (1,1,1),
+                 incl_only = None,
+
+                 DS = False, DS_wwp_func = nn.AvgPool2d, DS_act = False,
+                 
+                 kE_k = 15, kE_cf_m = 100, kE_ck_base = 4, 
+                 kE_OneByOne = False, kE_ck_grouped = False, kE_freeze = False,
+                 kE_chunked = 4,  # Number of chunks (integer)
+
+                 P_ck = None,
+                 
+                 O_mods = None, O_cf_pu_m = None,
+                 O_dropout = 0, O_bias = True,
+                 
+                 cf_ns = 1,
+                 activations = nn.ReLU(), activation_f = None, 
+                 batchnorm = 'before'):
+        
+        super(Oyster_V2_chunked, self).__init__()
+
+        self.incl_only = None
+        if incl_only is not None: 
+            if len(incl_only) == dim_i[0]: 
+                pass
+            else: 
+                dim_i = (len(incl_only), dim_i[1], dim_i[2])
+                self.incl_only = incl_only
+                print(dim_i)
+
+        self.Reflect = tu.ReflectLayer(dims = [-1, -2]) if DS else nn.Identity()
+        
+        kE_cf_f = kE_cf_m * dim_i[0]
+
+        if (dim_i[1] - kE_k + 1) < dim_f[1]: 
+            kE_k = dim_i[1] - dim_f[1] + 1
+
+        dim_i_ref = (dim_i[0], dim_i[1], dim_i[2]*2) if DS else dim_i
+        dim_kE_width = 2 if DS else 1
+        dim_kE_length = dim_i[1] - kE_k + 1
+        dim_kE = (kE_cf_f, dim_kE_length, dim_kE_width)
+
+        kE_Prong_args = {'dim_i': dim_i_ref, 'dim_f': dim_kE,
+                         'mods': 0, 'mods_ns': 0,    
+                         'cf_i': None, 'cf_ns': cf_ns, 'ck_base': kE_ck_base,
+                         'doublestranded': DS, 'OneByOne': kE_OneByOne,        
+                         'ck_grouped': kE_ck_grouped,
+                         'activations': activations, 'activation_f': None,
+                         'batchnorm': batchnorm, 'dropout': None, 'bias': True,
+                         'out': False}
+        
+        self.kE = nn.Sequential(*tp.Prong_X(**kE_Prong_args))
+
+        if kE_freeze:
+            for param in self.kE.parameters():
+                param.requires_grad = False
+
+        #---------------------------------------------------------------
+
+        anti_ref_layers = [tu.FlipLayer(), tu.WWPLayer(func = DS_wwp_func)]
+        if DS_act: 
+            anti_ref_layers.append(activations)
+
+        self.AntiReflect = nn.Sequential(*anti_ref_layers) if DS else nn.Identity()
+
+        #---------------------------------------------------------------
+
+        P_func = nn.AvgPool2d
+
+        if P_ck == None: 
+            P_ck = 0
+        if P_ck == 0:
+            self.P, P_length = (nn.Identity(), dim_kE_length)
+        elif P_ck > 1: 
+            self.P = P_func((P_ck, 1), stride = (P_ck,1), 
+                            padding = (0, 0), ceil_mode = True, divisor_override = P_ck)
+            P_length = int(np.ceil(dim_kE_length / P_ck))
+        else: # P_ck == 1, global pool
+            self.P = P_func((dim_kE_length, 1), stride = (1,1), 
+                            padding = (0, 0), ceil_mode = True, divisor_override = dim_kE_length)
+            P_length = 1
+
+        # Store chunking parameters
+        self.kE_k = kE_k
+        self.P_ck = P_ck
+        self.dim_kE_length = dim_kE_length
+        
+        # Precompute chunk boundaries
+        self.chunk_boundaries = None
+        if kE_chunked and P_ck > 1:
+            self.chunk_boundaries = calculate_chunk_boundaries_simple(
+                dim_i_length=dim_i[1],
+                kE_k=kE_k,
+                P_ck=P_ck,
+                num_chunks=int(kE_chunked),
+                dim_kE_length=dim_kE_length
+            )
+
+        if O_cf_pu_m == None: 
+            O_cf_pu_m = 0
+        O_cf_pu = O_cf_pu_m * kE_cf_f if O_cf_pu_m != 0 else None
+
+        O_Prong_args = {'dim_i': (kE_cf_f, P_length, 1), 'dim_f': dim_f,
+                        'mods': O_mods, 'mods_ns': 0,
+                        'cf_i': None, 'cf_ns': cf_ns, 'cf_pu': O_cf_pu,
+                        'ck_base': None,
+                        'activations': activations, 'activation_f': None,
+                        'batchnorm': batchnorm, 'dropout': O_dropout, 'bias': O_bias,
+                        'out': True}
+    
+        self.O = nn.Sequential(*tp.Prong_X(**O_Prong_args))
+
+        self.actf = nn.Identity() if activation_f is None else activation_f
+        
+    def forward(self, x):
+
+        if self.incl_only is not None: 
+            x = x[:, self.incl_only]
+
+        x = self.Reflect(x)
+        
+        # Apply chunked processing if enabled
+        if self.chunk_boundaries is not None:
+            x = self._forward_chunked(x)
+        else:
+            x = self.kE(x)
+            x = self.AntiReflect(x)
+            x = self.P(x)
+        
+        x = self.O(x)
+        x = self.actf(x)
+        
+        return x
+    
+    def _forward_chunked(self, x):
+        """
+        Process sequence in chunks aligned to pooling boundaries.
+        Each chunk processes complete pooling blocks to ensure correct averaging.
+        Applies pooling immediately after convolution to reduce memory usage.
+        """
+        if self.chunk_boundaries is None:
+            x = self.kE(x)
+            x = self.AntiReflect(x)
+            x = self.P(x)
+            return x
+        
+        pooled_chunks = []
+        P_func = nn.AvgPool2d
+        P_ck = self.P_ck
+        
+        for chunk_info in self.chunk_boundaries:
+            # Extract input chunk using precomputed boundaries
+            x_chunk = x[:, :, chunk_info['input_start']:chunk_info['input_end'], :]
+            
+            # Apply kE convolution
+            x_chunk = self.kE(x_chunk)
+            
+            # Apply AntiReflect
+            x_chunk = self.AntiReflect(x_chunk)
+            
+            # Apply pooling with divisor_override to match Oyster behavior
+            chunk_pool = P_func((P_ck, 1), stride=(P_ck, 1),
+                            padding=(0, 0), ceil_mode=True, divisor_override=P_ck)
+            x_chunk = chunk_pool(x_chunk)
+            
+            # Append and free memory
+            pooled_chunks.append(x_chunk)
+            del x_chunk
+        
+        # Concatenate all pooled chunks
+        result = torch.cat(pooled_chunks, dim=2)
+        del pooled_chunks
+        
+        return result
+    
+
+oys_args = {'dim_i': (1,249,4), 'dim_f': (1,1,1),
+                'DS': False, 'DS_wwp_func': nn.AvgPool2d, 'DS_act': False,
+                'incl_only': None,
+
+                'kE_k': 15, 'kE_cf_m': 100, 'kE_cf_ns': 1, 
+                'kE_ck_base': 4, 'kE_OneByOne': False, 
+                'kE_ck_grouped': False, 'kE_freeze': False,
+                
+                'P_ck': None, 'P_center': False,
+                
+                'O_mods': None, 'O_mods_ns': 0.3,
+                'O_cf_pu_m': None, 'O_cf_ns': 1, 
+                'O_ck_base': None, 'O_pool_k2s': 0.5,
+                'O_pool_func': None, 'O_actb4pool': True, 'O_dropout': 0,
+                
+                'activations': nn.ReLU(), 'activation_f': None, 
+                'batchnorm': 'before'}
+
+
+
+
+
+class DualOyster_V2_chunked(nn.Module): 
+    
+    def __init__(self, 
+                 dim_f = (1,1,1),
+
+                 A_dim_i = (1,249,4), A_incl_only = None,
+                 A_kE_k = 15, A_kE_cf_m = 100, A_kE_ck_base = 4, A_kE_ck_grouped = False, 
+                 A_P_ck = None,
+
+                 use_B = True,
+                 B_dim_i = (11,40,1), B_incl_only = None,
+                 B_kE_k = 5, B_kE_cf_m = 20, B_kE_ck_base = 3, B_kE_ck_grouped = False, 
+                 B_P_ck = None,
+
+                 cf_ns = 1, 
+                 kE_OnebyOne = False, kE_freeze = False,
+                 DS = False, DS_wwp_func = nn.AvgPool2d, DS_act = False,
+                 
+                 O_mods = None, O_cf_pu_m = None,
+                 O_dropout = 0, O_bias = False,
+                 activations = nn.ReLU(), activation_f = None, 
+                 batchnorm = 'before'):
+        
+        super(DualOyster_V2_chunked, self).__init__()
+
+        oys_shared_args = {'dim_f': dim_f,
+                           'cf_ns': cf_ns, 
+                           'kE_OnebyOne': kE_OnebyOne, 'kE_freeze': kE_freeze,
+                           'DS': DS, 'DS_wwp_func': DS_wwp_func, 'DS_act': DS_act,
+
+                           'O_mods': O_mods, 'O_cf_pu_m': O_cf_pu_m, 
+                           'O_dropout': O_dropout, 'O_bias': O_bias,
+                           'activations': activations,'batchnorm': batchnorm}
+        
+
+        oys_A_args = {'dim_i': A_dim_i, 'incl_only': A_incl_only,
+                      'kE_k': A_kE_k, 'kE_cf_m': A_kE_cf_m, 
+                      'kE_ck_base': A_kE_ck_base, 'kE_ck_grouped': A_kE_ck_grouped, 
+                      'P_ck': A_P_ck, 
+                      **oys_shared_args}
+        
+        self.OysterA = Oyster(**oys_A_args)
+
+        self.use_B = use_B 
+        if B_incl_only is not None: 
+            if len(B_incl_only) == 0: 
+                self.use_B = False 
+                B_incl_only = None
+        if self.use_B == False: print('NOT USING!!!!')  
+
+        
+
+        oys_B_args = {'dim_i': B_dim_i, 'incl_only': B_incl_only,
+                      'kE_k': B_kE_k, 'kE_cf_m': B_kE_cf_m, 
+                      'kE_ck_base': B_kE_ck_base, 'kE_ck_grouped': B_kE_ck_grouped, 
+                      'P_ck': B_P_ck, 
+                      **oys_shared_args}
+        
+        self.OysterB = Oyster(**oys_B_args)
+
+        self.FA = activation_f if activation_f != None else nn.Identity()
+
+    def forward(self, x1, x2): 
+
+        x1 = self.OysterA(x1)
+        x2 = self.OysterB(x2) if self.use_B else 0
+
+        return self.FA(x1 + x2)
