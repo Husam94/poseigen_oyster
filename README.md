@@ -7,6 +7,8 @@
 
 Oyster is a glass-box neural network for genomic sequence-to-function modeling. It learns the effects of *k*-mer composition and position while intentionally excluding *k*-mer associations (interactions among *k*-mers). The position-specific *k*-mer contributions can be read directly from the learned model weights.
 
+Part of the [Poseigen ecosystem](https://github.com/Husam94/poseigen).
+
 See the paper: [Oyster: A Neural Network for Modeling Genomic Sequences with Exact Position-Specific *k*-mer Contributions](https://www.biorxiv.org/content/10.1101/2025.11.01.686014). The paper compares Oyster with models that learn *k*-mer associations. Those models can achieve better predictive performance, while Oyster predictions remain in strong agreement and can serve as interpretable proxies.
 
 ## Installation
