@@ -1,15 +1,30 @@
 # Oyster
 
-Oyster is a Neural Network architecture that can be toggled to consider (non-Exact) or ignore (Exact) k-mer associations. 
+Oyster is a glass-box neural network for genomic sequence-to-function modeling. It learns the effects of k-mer composition and position while intentionally excluding k-mer associations (interactions among k-mers). The position-specific k-mer contributions can be read directly from the learned model weights.
 
-This package implements Oyster. It has two modules: 
+See the paper: [Oyster: A Neural Network for Modeling Genomic Sequences with Exact Position-Specific k-mer Contributions](https://www.biorxiv.org/content/10.1101/2025.11.01.686014v2.full). The paper compares Oyster with models that learn k-mer associations. Those models can achieve better predictive performance, while Oyster predictions remain in strong agreement and can serve as interpretable proxies.
 
-1. model
-- Here you will find the Oyster model. It is built using the [Trident](https://github.com/Husam94/poseigen_trident).
-- Dual Oyster combines two Oyster models to model different types of biological sequences. It is exemplified by modelling [YY1 interactions](https://github.com/Husam94/YY1) using genomic DNA sequences and histone signals. Dual Oyster also serves as a template for combining more than one Oyster into a single model. 
-- Recommended search spaces for hyperparameter optimizations are provided in [poseigen_compass](https://github.com/Husam94/poseigen_compass) format
-- Reset functions are provided to initialize or reinitialize models for model fitting.
+## Installation
 
-2. analysis 
-- Here you will find functions to analyze Exact Oyster architectures, to uncover learned concepts. These functions include determining the contribution of each sequence (for multi-sequence inputs), k-mer contributions, k-ppm contributions, and k-mer clustering and refining. 
-- Follow the example in modelling [YY1 interactions](https://github.com/Husam94/YY1). 
+Requires Python 3.12 or newer. Install from PyPI with:
+
+```bash
+python -m pip install poseigen_oyster
+```
+
+## Package
+
+- **`model`** provides `Oyster` and `Dual_Oyster`. `Dual_Oyster` combines two Oyster models, allowing each branch to use different inputs, k-mer sizes, position-pooling settings, and chunking.
+- **`analysis`** provides tools for inspecting Oyster models, including sequence and k-mer contributions, PWM-derived contributions, clustering, and cluster refinement.
+- `Oyster_BaseDict` and `Dual_Oyster_BaseDict` define hyperparameter search spaces for `Oyster` and `Dual_Oyster` to use with [poseigen_compass](https://github.com/Husam94/poseigen_compass).
+- Oyster is built using [poseigen_trident](https://github.com/Husam94/poseigen_trident).
+
+## Case studies
+
+Oyster has been exemplified in the following case studies:
+
+- **Protein-DNA interactions**
+  - [CTCF case study](https://github.com/Husam94/CS-CTCF)
+  - [YY1 case study](https://github.com/Husam94/CS-YY1)
+- **Enhancer activity**
+  - [Enhancer activity case study](https://github.com/Husam94/CS-EnhAct)

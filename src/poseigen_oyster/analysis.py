@@ -18,8 +18,6 @@ def SigContrib(model, inp,
                    sub_model = None, 
                    batchsize = 256, model_weights = None):
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
     shapo = inp.shape #the 2nd dimension is always the number of sigs. 
     num_sigs = shapo[1]
 
@@ -54,15 +52,15 @@ def SigContrib(model, inp,
                 Dweight = mo.O[ger].weight
                 Dweight = torch.unsqueeze(Dweight, 0)
 
-                x = torch.FloatTensor(batch).to(device)
+                x = torch.as_tensor(batch, dtype=torch.float32, device=Dweight.device)
 
                 if hasattr(mo, "Reflect") and callable(getattr(mo, "Reflect")):
-                    mo.Reflect()
+                    x = mo.Reflect(x)
                 
                 x = mo.kE(x)
                 
                 if hasattr(mo, "AntiReflect") and callable(getattr(mo, "AntiReflect")):
-                    mo.AntiReflect()
+                    x = mo.AntiReflect(x)
                 
                 x = mo.P(x)
                 
@@ -82,6 +80,28 @@ def SigContrib(model, inp,
         
     return np.vstack(fins)
 
+
+def _pool_contribution_divisor(model, dim_kE_length=None):
+    p_ck = getattr(model, 'P_ck', None)
+    if p_ck == 0:
+        return None
+    if p_ck == 1:
+        if dim_kE_length is not None:
+            return dim_kE_length
+        if hasattr(model, 'dim_kE_length'):
+            return model.dim_kE_length
+
+    if p_ck is not None:
+        return p_ck
+
+    pool = model.P
+    if isinstance(pool, nn.Sequential):
+        pool = next(
+            (layer for layer in pool if isinstance(layer, nn.AvgPool2d)),
+            None)
+    if isinstance(pool, nn.AvgPool2d):
+        return pool.kernel_size[0]
+    return None
 
 
 def kmer_contrib(model, inp, sub_model = None, 
@@ -118,7 +138,8 @@ def kmer_contrib(model, inp, sub_model = None,
         
         #---------------------------------
         
-        x = inp
+        model_device = next(mo.parameters()).device
+        x = torch.as_tensor(inp, dtype=torch.float32, device=model_device)
 
         if joint: x = mo.Reflect(x)
 
@@ -127,9 +148,9 @@ def kmer_contrib(model, inp, sub_model = None,
 
         #---------------------------
 
-        if isinstance(mo.P, nn.Identity) is False:
-            P_ck = mo.P.kernel_size[0]
-            x = x / P_ck
+        pool_divisor = _pool_contribution_divisor(mo, dim_kE_length)
+        if pool_divisor is not None and pool_divisor > 1:
+            x = x / pool_divisor
 
         #---------------------------
 
@@ -251,49 +272,49 @@ def kppm_contrib(model, kppm,
 
 def contrib_perpos(contribs, oys_dict, submodel = None, k_len = None):
    
-    # this function takes your contribution per position block 
-    # and expands it to the whole sequence
+    prefix = '' if submodel is None else submodel + '_'
+    seq_len = oys_dict[prefix + 'dim_i'][1]
+    P_ck = oys_dict.get(prefix + 'P_ck')
+    if k_len is None:
+        k_len = oys_dict[prefix + 'kE_k']
 
-    # center in this case means that the model used padding for pooling. 
+    dim_kE_length = seq_len - k_len + 1
+    if P_ck is None or P_ck == 0:
+        if contribs.shape[1] != dim_kE_length:
+            raise ValueError(
+                f"Expected {dim_kE_length} unpooled contributions, "
+                f"got {contribs.shape[1]}.")
+        return contribs
 
-    #contribs shape: (subjects, pos, *)
-
-    #-------------------------------
-
-    submodel = '' if submodel is None else submodel + '_'
-
-    seq_len = oys_dict[submodel + 'dim_i'][1]
-    P_ck = oys_dict[submodel + 'P_ck']
-    
-    
-    if 'P_center' in oys_dict.keys(): P_center = oys_dict['P_center']
-    else: P_center = False
-
-    if k_len is None: k_len = oys_dict[submodel + 'kE_k']
-
-    #-------------------------------
-
-    dim_kE_length = seq_len - k_len + 1                                                     
-
-
-    needed = P_ck - (dim_kE_length % P_ck)
-    pad2add = (needed // 2) if P_center else 0
+    if P_ck == 1:
+        if contribs.shape[1] != 1:
+            raise ValueError(
+                f"Global pooling expects one contribution position, "
+                f"got {contribs.shape[1]}.")
+        return np.repeat(contribs, dim_kE_length, axis=1)
 
     P_length = int(np.ceil(dim_kE_length / P_ck))
+    if contribs.shape[1] != P_length:
+        raise ValueError(
+            f"Expected {P_length} pooled contributions, got {contribs.shape[1]}.")
 
-    #-------------------------------------------
+    P_center = oys_dict.get(
+        prefix + 'P_center', oys_dict.get('P_center', False))
+    if oys_dict.get(prefix + 'kE_chunked') is not None:
+        P_center = False
+    pad_left = ((-dim_kE_length) % P_ck) // 2 if P_center else 0
 
-    firstpos = P_ck - pad2add
-    midpos = P_ck 
-    lastpos = dim_kE_length - firstpos - (midpos * (P_length - 2))
+    per_position = []
+    for bin_idx in range(P_length):
+        start = bin_idx * P_ck - pad_left
+        valid_start = max(start, 0)
+        valid_end = min(start + P_ck, dim_kE_length)
+        valid_length = max(valid_end - valid_start, 0)
+        if valid_length:
+            per_position.append(
+                np.repeat(contribs[:, [bin_idx]], valid_length, axis=1))
 
-    contribs_perpos = [np.repeat(contribs[:, [0]], firstpos, axis = 1),
-                       *[np.repeat(contribs[:, x], midpos, axis = 1) for x in [np.arange(P_length)[1:-1]]], 
-                       np.repeat(contribs[:, [-1]], lastpos, axis = 1)]
-        
-    contribs_perpos = np.concatenate(contribs_perpos, axis = 1)
-                    
-    return contribs_perpos
+    return np.concatenate(per_position, axis=1)
 
 
 def sppm_contrib(kppm_contribs_exp, kppm_idxs, sum = False):
@@ -1027,4 +1048,3 @@ def batched_ensemble_ixg(model_pns, seqs, signals=None, target=None, weights=Non
     if signals is not None:
         return seq_attrs, np.concatenate(sig_attrs, axis=0)
     return seq_attrs
-
