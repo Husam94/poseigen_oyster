@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/poseigen_oyster)](https://pypi.org/project/poseigen_oyster/)
 [![Python versions](https://img.shields.io/pypi/pyversions/poseigen_oyster)](https://pypi.org/project/poseigen_oyster/)
-[![License](https://img.shields.io/github/license/Husam94/poseigen_oyster)](LICENSE.txt)
+[![License](https://img.shields.io/pypi/l/poseigen_oyster)](https://pypi.org/project/poseigen_oyster/)
 [![bioRxiv preprint](https://img.shields.io/badge/preprint-bioRxiv-B31B1B)](https://www.biorxiv.org/content/10.1101/2025.11.01.686014)
 
 Oyster is a glass-box neural network for genomic sequence-to-function modeling. It learns the effects of *k*-mer composition and position while intentionally excluding *k*-mer associations (interactions among *k*-mers). The position-specific *k*-mer contributions can be read directly from the learned model weights.
